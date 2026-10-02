@@ -1,0 +1,33 @@
+name: Tests and image build
+on: [workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -r requirements.lock
+      - run: pip install -e '.[test]'
+      - run: pytest -q
+      - run: python -m compileall -q infermesh scripts
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t infermesh:ci .
+      - name: Container smoke
+        shell: bash
+        run: |
+          docker run -d --name gateway -p 8000:8000 -e INFERMESH_API_KEY=ci-only-disposable-test-key infermesh:ci
+          trap 'docker logs gateway; docker rm -f gateway' EXIT
+          for i in {1..30}; do curl -fsS http://127.0.0.1:8000/healthz && break || sleep 1; done
+          curl -fsS http://127.0.0.1:8000/readyz
+          curl -fsS http://127.0.0.1:8000/v1/chat/completions -H 'Authorization: Bearer ci-only-disposable-test-key' -H 'Content-Type: application/json' -d '{"model":"auto","messages":[{"role":"user","content":"ping"}]}'
+
