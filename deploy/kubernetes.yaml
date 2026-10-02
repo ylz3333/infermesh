@@ -1,0 +1,101 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: infermesh
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: infermesh-config
+  namespace: infermesh
+data:
+  gateway.json: |
+    {"providers":[{"name":"demo","kind":"mock","model":"mock-k8s","quality":3}],"pools":{"auto":["demo"]}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infermesh
+  namespace: infermesh
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  selector:
+    matchLabels: {app: infermesh}
+  template:
+    metadata:
+      labels: {app: infermesh}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: gateway
+          image: infermesh:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports: [{containerPort: 8000}]
+          env:
+            - name: INFERMESH_API_KEY
+              valueFrom: {secretKeyRef: {name: infermesh-secrets, key: gateway-key}}
+            - name: INFERMESH_CONFIG
+              value: /config/gateway.json
+          volumeMounts:
+            - {name: config, mountPath: /config, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+          resources:
+            requests: {cpu: 200m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          startupProbe:
+            httpGet: {path: /healthz, port: 8000}
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /readyz, port: 8000}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8000}
+            periodSeconds: 15
+      volumes:
+        - name: config
+          configMap: {name: infermesh-config}
+        - name: tmp
+          emptyDir: {medium: Memory, sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: infermesh
+  namespace: infermesh
+spec:
+  selector: {app: infermesh}
+  ports: [{port: 8000, targetPort: 8000}]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: infermesh
+  namespace: infermesh
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: infermesh}
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 70}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: infermesh
+  namespace: infermesh
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app: infermesh}
+
