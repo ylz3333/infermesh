@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "infermesh"
+version = "0.1.0"
+description = "An observable, policy-driven gateway for OpenAI-compatible LLM endpoints."
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1", "uvicorn>=0.34,<1", "httpx>=0.28,<1",
+  "pydantic>=2.10,<3", "prometheus-client>=0.21,<1",
+  "opentelemetry-sdk>=1.30,<2", "opentelemetry-exporter-otlp-proto-http>=1.30,<2",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[tool.setuptools.packages.find]
+include = ["infermesh*"]
+
+[tool.setuptools.package-data]
+infermesh = ["dashboard.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

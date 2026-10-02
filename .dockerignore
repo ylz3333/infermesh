@@ -1,0 +1,8 @@
+.git
+.env
+.venv
+__pycache__
+*.egg-info
+results
+config.local.json
+
