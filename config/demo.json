@@ -1,0 +1,10 @@
+{
+  "providers": [
+    {"name":"demo-fast","kind":"mock","model":"mock-fast","quality":1,"mock_latency_ms":15,"initial_latency_ms":15,"input_per_million":0.1,"output_per_million":0.2},
+    {"name":"demo-capable","kind":"mock","model":"mock-capable","quality":3,"mock_latency_ms":40,"initial_latency_ms":40,"input_per_million":1,"output_per_million":2}
+  ],
+  "pools":{"auto":["demo-fast","demo-capable"]},
+  "requests_per_minute":6000,
+  "max_inflight":100
+}
+

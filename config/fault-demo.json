@@ -1,0 +1,12 @@
+{
+  "providers":[
+    {"name":"flaky-primary","kind":"mock","model":"mock-primary","quality":3,"mock_latency_ms":5,"mock_fail_every":2,"initial_latency_ms":5,"concurrency":64},
+    {"name":"stable-fallback","kind":"mock","model":"mock-fallback","quality":3,"mock_latency_ms":15,"input_per_million":1,"initial_latency_ms":15,"concurrency":64}
+  ],
+  "pools":{"auto":["flaky-primary","stable-fallback"]},
+  "requests_per_minute":100000,
+  "max_inflight":128,
+  "failure_threshold":3,
+  "cooldown_seconds":2
+}
+
