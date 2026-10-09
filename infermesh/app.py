@@ -119,7 +119,9 @@ def create_app(settings: Settings | None = None, *, client: httpx.AsyncClient | 
             data = Chat.model_validate_json(body)
         except ValidationError:
             raise HTTPException(422, "Invalid chat request; see /docs for schema") from None
-        if any(m.get("role") not in {"system", "developer", "user", "assistant", "tool"} for m in data.messages):
+        if any(not isinstance(m.get("role"), str)
+               or m["role"] not in {"system", "developer", "user", "assistant", "tool"}
+               for m in data.messages):
             raise HTTPException(422, "Unsupported message role")
         if data.model not in cfg.pools:
             raise HTTPException(404, "Unknown model pool")
