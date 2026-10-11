@@ -42,7 +42,7 @@ class Settings(BaseModel):
     pools: dict[str, list[str]]
     timeout_seconds: float = Field(default=30, gt=0, le=300)
     failure_threshold: int = Field(default=3, ge=1)
-    cooldown_seconds: float = Field(default=15, gt=0)
+    cooldown_seconds: float = Field(default=15, gt=0, allow_inf_nan=False)
     requests_per_minute: int = Field(default=600, ge=1)
     max_inflight: int = Field(default=100, ge=1)
     capture_content: bool = False
