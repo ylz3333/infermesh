@@ -170,6 +170,43 @@ def test_broken_stream_no_replay_or_false_done():
         assert state["inflight"] == 0 and state["requests"][0]["outcome"] == "error"
 
 
+@pytest.mark.parametrize("field", ["choice", "tool"])
+@pytest.mark.parametrize("index", [[], {}, -1, True, "0", 0.5, None])
+def test_invalid_stream_tool_indices_are_sanitized(field, index):
+    tool = {"index": index if field == "tool" else 0, "id": "private-tool-id"}
+    choice = {"index": index if field == "choice" else 0, "delta": {"tool_calls": [tool]}}
+    content = ("data: " + json.dumps({"choices": [choice]}) + "\n\ndata: [DONE]\n\n").encode()
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, content=content))
+    app = create_app(real_settings(), client=httpx.AsyncClient(transport=transport))
+    with TestClient(app) as c:
+        r = c.post("/v1/chat/completions", headers=HEADERS, json={**BODY, "stream": True})
+        assert "upstream_stream_error" in r.text
+        assert "[DONE]" not in r.text
+        assert "private-tool-id" not in r.text
+        state = c.get("/admin/status", headers=HEADERS).json()
+        assert state["inflight"] == 0
+        assert state["providers"][0]["inflight"] == 0
+        assert state["requests"][0]["outcome"] == "error"
+        assert state["requests"][0]["tool_calls"] == 0
+
+
+def test_valid_stream_tool_indices_preserve_distinct_call_counts():
+    choices = [
+        {"index": 0, "delta": {"tool_calls": [{"index": 0}, {"index": 1}]}},
+        {"index": 1, "delta": {"tool_calls": [{"index": 0}]}},
+    ]
+    frame = "data: " + json.dumps({"choices": choices}) + "\n\n"
+    content = (frame + frame + "data: [DONE]\n\n").encode()
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, content=content))
+    with TestClient(create_app(real_settings(), client=httpx.AsyncClient(transport=transport))) as c:
+        r = c.post("/v1/chat/completions", headers=HEADERS, json={**BODY, "stream": True})
+        assert "[DONE]" in r.text and "upstream_stream_error" not in r.text
+        state = c.get("/admin/status", headers=HEADERS).json()
+        assert state["requests"][0]["tool_calls"] == 3
+        assert state["requests"][0]["outcome"] == "success"
+        assert state["inflight"] == 0
+
+
 def test_real_sse_usage_and_done():
     content = b'data: {"choices":[{"delta":{"content":"hello"}}]}\r\n\r\ndata: {"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":1}}\n\ndata: [DONE]\n\n'
     transport = httpx.MockTransport(lambda req: httpx.Response(200, content=content))

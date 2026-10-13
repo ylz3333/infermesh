@@ -103,8 +103,14 @@ async def events(response):
                     for choice in obj.get("choices", []):
                         if not isinstance(choice, dict) or not isinstance(choice.get("delta", {}), dict):
                             raise ValueError()
+                        index = choice.get("index", 0)
+                        if type(index) is not int or index < 0:
+                            raise ValueError()
                         tools = choice.get("delta", {}).get("tool_calls", [])
                         if not isinstance(tools, list) or any(not isinstance(t, dict) for t in tools):
+                            raise ValueError()
+                        if any(type(t.get("index", 0)) is not int or t.get("index", 0) < 0
+                               for t in tools):
                             raise ValueError()
                 except ValueError:
                     raise UpstreamError("invalid_stream", False) from None
