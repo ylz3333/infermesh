@@ -207,6 +207,45 @@ def test_valid_stream_tool_indices_preserve_distinct_call_counts():
         assert state["inflight"] == 0
 
 
+def test_invalid_tool_index_after_partial_output_closes_stream_without_failover():
+    class BrokenToolStream(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            yield b'data: {"choices":[{"index":0,"delta":{"content":"partial-answer"}}]}\n\n'
+            yield b'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":[],"id":"private-id"}]}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+        async def aclose(self):
+            self.closed = True
+
+    stream = BrokenToolStream()
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, stream=stream)
+
+    raw = real_settings().model_dump()
+    raw["providers"].append({"name": "fallback", "kind": "mock", "model": "backup",
+                             "input_per_million": 100})
+    raw["pools"]["auto"].append("fallback")
+    cfg = Settings.model_validate(raw)
+    with TestClient(create_app(cfg, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))) as c:
+        r = c.post("/v1/chat/completions", headers=HEADERS,
+                   json={**BODY, "stream": True, "routing": {"policy": "cost"}})
+        assert r.text.count("partial-answer") == 1
+        assert r.text.count("upstream_stream_error") == 1
+        assert r.text.index("partial-answer") < r.text.index("upstream_stream_error")
+        assert "[DONE]" not in r.text and "private-id" not in r.text
+        assert stream.closed and len(calls) == 1
+        state = c.get("/admin/status", headers=HEADERS).json()
+        assert state["requests"][0]["attempts"] == ["real"]
+        assert state["requests"][0]["outcome"] == "error"
+        assert state["inflight"] == 0
+        assert all(p["inflight"] == 0 for p in state["providers"])
+
+
 def test_real_sse_usage_and_done():
     content = b'data: {"choices":[{"delta":{"content":"hello"}}]}\r\n\r\ndata: {"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":1}}\n\ndata: [DONE]\n\n'
     transport = httpx.MockTransport(lambda req: httpx.Response(200, content=content))
