@@ -255,6 +255,22 @@ def test_real_sse_usage_and_done():
         assert c.get("/admin/status", headers=HEADERS).json()["requests"][0]["input_tokens"] == 2
 
 
+@pytest.mark.parametrize("tool", [None, "private-invalid-tool", 42, [], True])
+def test_non_object_tool_calls_are_rejected_without_success_accounting(tool):
+    response = {"choices": [{"message": {"role": "assistant", "tool_calls": [tool]}}]}
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=response))
+    with TestClient(create_app(real_settings(), client=httpx.AsyncClient(transport=transport))) as c:
+        r = c.post("/v1/chat/completions", headers=HEADERS, json=BODY)
+        assert r.status_code == 502
+        assert r.json()["error"]["type"] == "upstream_unavailable"
+        assert "private-invalid-tool" not in r.text
+        state = c.get("/admin/status", headers=HEADERS).json()
+        assert state["inflight"] == 0
+        assert state["providers"][0]["inflight"] == 0
+        assert state["requests"][0]["outcome"] == "error"
+        assert state["requests"][0]["tool_calls"] == 0
+
+
 def test_invalid_provider_response_releases_capacity():
     transport = httpx.MockTransport(lambda req: httpx.Response(200, json={"choices": [None]}))
     with TestClient(create_app(real_settings(), client=httpx.AsyncClient(transport=transport))) as c:

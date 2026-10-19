@@ -63,7 +63,9 @@ async def read_json(response):
         if not isinstance(result, dict) or not isinstance(result.get("choices"), list) or not result["choices"]:
             raise UpstreamError("invalid_response")
         if any(not isinstance(c, dict) or not isinstance(c.get("message"), dict)
-               or not isinstance(c["message"].get("tool_calls", []), list) for c in result["choices"]):
+               or not isinstance(c["message"].get("tool_calls", []), list)
+               or any(not isinstance(t, dict) for t in c["message"].get("tool_calls", []))
+               for c in result["choices"]):
             raise UpstreamError("invalid_response")
         return result
     except (ValueError, httpx.HTTPError):
