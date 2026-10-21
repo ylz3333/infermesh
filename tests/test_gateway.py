@@ -271,6 +271,41 @@ def test_non_object_tool_calls_are_rejected_without_success_accounting(tool):
         assert state["requests"][0]["tool_calls"] == 0
 
 
+def test_malformed_tool_response_fails_over_to_healthy_provider():
+    raw = real_settings().model_dump()
+    raw["providers"].append({"name": "backup", "kind": "mock", "model": "backup-model",
+                             "input_per_million": 100})
+    raw["pools"]["auto"].append("backup")
+    responses = []
+
+    def handler(request):
+        response = httpx.Response(200, json={"choices": [{"message": {
+            "role": "assistant", "tool_calls": ["private-invalid-tool"]
+        }}]})
+        responses.append(response)
+        return response
+
+    app = create_app(Settings.model_validate(raw),
+                     client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    with TestClient(app) as c:
+        r = c.post("/v1/chat/completions", headers=HEADERS,
+                   json={**BODY, "routing": {"policy": "cost"}})
+        assert r.status_code == 200
+        assert r.headers["x-infermesh-provider"] == "backup"
+        assert r.json()["choices"][0]["message"]["content"] == "pong"
+        assert "private-invalid-tool" not in r.text
+        assert len(responses) == 1 and responses[0].is_closed
+        state = c.get("/admin/status", headers=HEADERS).json()
+        record = state["requests"][0]
+        assert record["attempts"] == ["real", "backup"]
+        assert record["provider"] == "backup" and record["outcome"] == "success"
+        assert record["tool_calls"] == 0
+        assert state["inflight"] == 0
+        assert all(p["inflight"] == 0 for p in state["providers"])
+        assert app.state.router.states["real"].failures == 1
+        assert app.state.router.states["backup"].failures == 0
+
+
 def test_invalid_provider_response_releases_capacity():
     transport = httpx.MockTransport(lambda req: httpx.Response(200, json={"choices": [None]}))
     with TestClient(create_app(real_settings(), client=httpx.AsyncClient(transport=transport))) as c:
