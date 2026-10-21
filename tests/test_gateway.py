@@ -170,6 +170,82 @@ def test_broken_stream_no_replay_or_false_done():
         assert state["inflight"] == 0 and state["requests"][0]["outcome"] == "error"
 
 
+@pytest.mark.parametrize("field", ["choice", "tool"])
+@pytest.mark.parametrize("index", [[], {}, -1, True, "0", 0.5, None])
+def test_invalid_stream_tool_indices_are_sanitized(field, index):
+    tool = {"index": index if field == "tool" else 0, "id": "private-tool-id"}
+    choice = {"index": index if field == "choice" else 0, "delta": {"tool_calls": [tool]}}
+    content = ("data: " + json.dumps({"choices": [choice]}) + "\n\ndata: [DONE]\n\n").encode()
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, content=content))
+    app = create_app(real_settings(), client=httpx.AsyncClient(transport=transport))
+    with TestClient(app) as c:
+        r = c.post("/v1/chat/completions", headers=HEADERS, json={**BODY, "stream": True})
+        assert "upstream_stream_error" in r.text
+        assert "[DONE]" not in r.text
+        assert "private-tool-id" not in r.text
+        state = c.get("/admin/status", headers=HEADERS).json()
+        assert state["inflight"] == 0
+        assert state["providers"][0]["inflight"] == 0
+        assert state["requests"][0]["outcome"] == "error"
+        assert state["requests"][0]["tool_calls"] == 0
+
+
+def test_valid_stream_tool_indices_preserve_distinct_call_counts():
+    choices = [
+        {"index": 0, "delta": {"tool_calls": [{"index": 0}, {"index": 1}]}},
+        {"index": 1, "delta": {"tool_calls": [{"index": 0}]}},
+    ]
+    frame = "data: " + json.dumps({"choices": choices}) + "\n\n"
+    content = (frame + frame + "data: [DONE]\n\n").encode()
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, content=content))
+    with TestClient(create_app(real_settings(), client=httpx.AsyncClient(transport=transport))) as c:
+        r = c.post("/v1/chat/completions", headers=HEADERS, json={**BODY, "stream": True})
+        assert "[DONE]" in r.text and "upstream_stream_error" not in r.text
+        state = c.get("/admin/status", headers=HEADERS).json()
+        assert state["requests"][0]["tool_calls"] == 3
+        assert state["requests"][0]["outcome"] == "success"
+        assert state["inflight"] == 0
+
+
+def test_invalid_tool_index_after_partial_output_closes_stream_without_failover():
+    class BrokenToolStream(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            yield b'data: {"choices":[{"index":0,"delta":{"content":"partial-answer"}}]}\n\n'
+            yield b'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":[],"id":"private-id"}]}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+        async def aclose(self):
+            self.closed = True
+
+    stream = BrokenToolStream()
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, stream=stream)
+
+    raw = real_settings().model_dump()
+    raw["providers"].append({"name": "fallback", "kind": "mock", "model": "backup",
+                             "input_per_million": 100})
+    raw["pools"]["auto"].append("fallback")
+    cfg = Settings.model_validate(raw)
+    with TestClient(create_app(cfg, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))) as c:
+        r = c.post("/v1/chat/completions", headers=HEADERS,
+                   json={**BODY, "stream": True, "routing": {"policy": "cost"}})
+        assert r.text.count("partial-answer") == 1
+        assert r.text.count("upstream_stream_error") == 1
+        assert r.text.index("partial-answer") < r.text.index("upstream_stream_error")
+        assert "[DONE]" not in r.text and "private-id" not in r.text
+        assert stream.closed and len(calls) == 1
+        state = c.get("/admin/status", headers=HEADERS).json()
+        assert state["requests"][0]["attempts"] == ["real"]
+        assert state["requests"][0]["outcome"] == "error"
+        assert state["inflight"] == 0
+        assert all(p["inflight"] == 0 for p in state["providers"])
+
+
 def test_real_sse_usage_and_done():
     content = b'data: {"choices":[{"delta":{"content":"hello"}}]}\r\n\r\ndata: {"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":1}}\n\ndata: [DONE]\n\n'
     transport = httpx.MockTransport(lambda req: httpx.Response(200, content=content))
@@ -177,6 +253,57 @@ def test_real_sse_usage_and_done():
         r = c.post("/v1/chat/completions", headers=HEADERS, json={**BODY, "stream": True})
         assert "[DONE]" in r.text
         assert c.get("/admin/status", headers=HEADERS).json()["requests"][0]["input_tokens"] == 2
+
+
+@pytest.mark.parametrize("tool", [None, "private-invalid-tool", 42, [], True])
+def test_non_object_tool_calls_are_rejected_without_success_accounting(tool):
+    response = {"choices": [{"message": {"role": "assistant", "tool_calls": [tool]}}]}
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=response))
+    with TestClient(create_app(real_settings(), client=httpx.AsyncClient(transport=transport))) as c:
+        r = c.post("/v1/chat/completions", headers=HEADERS, json=BODY)
+        assert r.status_code == 502
+        assert r.json()["error"]["type"] == "upstream_unavailable"
+        assert "private-invalid-tool" not in r.text
+        state = c.get("/admin/status", headers=HEADERS).json()
+        assert state["inflight"] == 0
+        assert state["providers"][0]["inflight"] == 0
+        assert state["requests"][0]["outcome"] == "error"
+        assert state["requests"][0]["tool_calls"] == 0
+
+
+def test_malformed_tool_response_fails_over_to_healthy_provider():
+    raw = real_settings().model_dump()
+    raw["providers"].append({"name": "backup", "kind": "mock", "model": "backup-model",
+                             "input_per_million": 100})
+    raw["pools"]["auto"].append("backup")
+    responses = []
+
+    def handler(request):
+        response = httpx.Response(200, json={"choices": [{"message": {
+            "role": "assistant", "tool_calls": ["private-invalid-tool"]
+        }}]})
+        responses.append(response)
+        return response
+
+    app = create_app(Settings.model_validate(raw),
+                     client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    with TestClient(app) as c:
+        r = c.post("/v1/chat/completions", headers=HEADERS,
+                   json={**BODY, "routing": {"policy": "cost"}})
+        assert r.status_code == 200
+        assert r.headers["x-infermesh-provider"] == "backup"
+        assert r.json()["choices"][0]["message"]["content"] == "pong"
+        assert "private-invalid-tool" not in r.text
+        assert len(responses) == 1 and responses[0].is_closed
+        state = c.get("/admin/status", headers=HEADERS).json()
+        record = state["requests"][0]
+        assert record["attempts"] == ["real", "backup"]
+        assert record["provider"] == "backup" and record["outcome"] == "success"
+        assert record["tool_calls"] == 0
+        assert state["inflight"] == 0
+        assert all(p["inflight"] == 0 for p in state["providers"])
+        assert app.state.router.states["real"].failures == 1
+        assert app.state.router.states["backup"].failures == 0
 
 
 def test_invalid_provider_response_releases_capacity():
