@@ -1,6 +1,7 @@
 """Adapters for real OpenAI-compatible endpoints and explicit offline fixtures."""
 import asyncio
 import json
+import math
 import os
 import time
 import uuid
@@ -55,6 +56,14 @@ def _reject_json_constant(value):
     raise ValueError("Non-standard JSON numeric constant")
 
 
+def _finite_json_float(value):
+    """Prevent valid numeric syntax from overflowing into nonfinite output."""
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("JSON number exceeds finite float range")
+    return number
+
+
 async def read_json(response):
     if isinstance(response, dict):
         return response
@@ -64,7 +73,7 @@ async def read_json(response):
             data.extend(chunk)
             if len(data) > 4 * 1024 * 1024:
                 raise UpstreamError("response_too_large", False)
-        result = json.loads(data, parse_constant=_reject_json_constant)
+        result = json.loads(data, parse_constant=_reject_json_constant, parse_float=_finite_json_float)
         if not isinstance(result, dict) or not isinstance(result.get("choices"), list) or not result["choices"]:
             raise UpstreamError("invalid_response")
         if any(not isinstance(c, dict) or not isinstance(c.get("message"), dict)
@@ -102,7 +111,7 @@ async def events(response):
                     done = True
                     return
                 try:
-                    obj = json.loads(data, parse_constant=_reject_json_constant)
+                    obj = json.loads(data, parse_constant=_reject_json_constant, parse_float=_finite_json_float)
                     if not isinstance(obj, dict) or "error" in obj or not isinstance(obj.get("choices", []), list):
                         raise ValueError()
                     for choice in obj.get("choices", []):
