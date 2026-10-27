@@ -80,7 +80,7 @@ async def read_json(response):
                or not isinstance(c["message"].get("tool_calls", []), list) for c in result["choices"]):
             raise UpstreamError("invalid_response")
         return result
-    except (ValueError, httpx.HTTPError):
+    except (ValueError, RecursionError, httpx.HTTPError):
         raise UpstreamError("invalid_response") from None
     finally:
         await response.aclose()
@@ -120,7 +120,7 @@ async def events(response):
                         tools = choice.get("delta", {}).get("tool_calls", [])
                         if not isinstance(tools, list) or any(not isinstance(t, dict) for t in tools):
                             raise ValueError()
-                except ValueError:
+                except (ValueError, RecursionError):
                     raise UpstreamError("invalid_stream", False) from None
                 yield obj
         if not done:
