@@ -186,6 +186,55 @@ def test_invalid_provider_response_releases_capacity():
         assert c.get("/admin/status", headers=HEADERS).json()["inflight"] == 0
 
 
+@pytest.mark.parametrize("invalid_value", [b"NaN", b"1e400", b"[" * 100000 + b"0" + b"]" * 100000],
+                         ids=["nonstandard-number", "float-overflow", "excessive-nesting"])
+def test_json_decoder_failures_use_backup_and_record_primary_failure(invalid_value):
+    cfg = real_settings().model_dump()
+    cfg["providers"].append({"name": "backup", "model": "backup-model",
+                             "base_url": "https://backup.invalid/v1", "input_per_million": 10})
+    cfg["pools"]["auto"].append("backup")
+    calls = []
+
+    class InvalidBody(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            yield (b'{"choices":[{"message":{"content":"private-primary-output"}}],"extra":'
+                   + invalid_value + b'}')
+
+        async def aclose(self):
+            self.closed = True
+
+    body = InvalidBody()
+
+    def handler(request):
+        calls.append(request.url.host)
+        if request.url.host == "example.invalid":
+            return httpx.Response(200, stream=body)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "backup answer"}}],
+                                        "usage": {"prompt_tokens": 2, "completion_tokens": 3}})
+
+    app = create_app(Settings.model_validate(cfg), client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    with TestClient(app) as client:
+        response = client.post("/v1/chat/completions", headers=HEADERS,
+                               json={**BODY, "routing": {"policy": "cost"}})
+        assert response.status_code == 200
+        assert response.headers["x-infermesh-provider"] == "backup"
+        assert response.json()["choices"][0]["message"]["content"] == "backup answer"
+        assert "private-primary-output" not in response.text
+        assert calls == ["example.invalid", "backup.invalid"]
+        assert body.closed
+        state = client.get("/admin/status", headers=HEADERS).json()
+        assert state["inflight"] == 0
+        assert all(provider["inflight"] == 0 for provider in state["providers"])
+        entry = state["requests"][0]
+        assert entry["attempts"] == ["real", "backup"]
+        assert entry["outcome"] == "success"
+        assert (entry["input_tokens"], entry["output_tokens"]) == (2, 3)
+        assert app.state.router.states["real"].failures == 1
+        assert app.state.router.states["backup"].failures == 0
+
+
 def test_concurrent_capacity_is_bounded():
     async def scenario():
         cfg = settings(max_inflight=1)

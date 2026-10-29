@@ -1,6 +1,7 @@
 """Adapters for real OpenAI-compatible endpoints and explicit offline fixtures."""
 import asyncio
 import json
+import math
 import os
 import time
 import uuid
@@ -50,6 +51,19 @@ class Adapters:
         return response
 
 
+def _reject_json_constant(value):
+    """Reject Python's non-standard NaN/Infinity JSON extensions."""
+    raise ValueError("Non-standard JSON numeric constant")
+
+
+def _finite_json_float(value):
+    """Prevent valid numeric syntax from overflowing into nonfinite output."""
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("JSON number exceeds finite float range")
+    return number
+
+
 async def read_json(response):
     if isinstance(response, dict):
         return response
@@ -59,14 +73,14 @@ async def read_json(response):
             data.extend(chunk)
             if len(data) > 4 * 1024 * 1024:
                 raise UpstreamError("response_too_large", False)
-        result = json.loads(data)
+        result = json.loads(data, parse_constant=_reject_json_constant, parse_float=_finite_json_float)
         if not isinstance(result, dict) or not isinstance(result.get("choices"), list) or not result["choices"]:
             raise UpstreamError("invalid_response")
         if any(not isinstance(c, dict) or not isinstance(c.get("message"), dict)
                or not isinstance(c["message"].get("tool_calls", []), list) for c in result["choices"]):
             raise UpstreamError("invalid_response")
         return result
-    except (ValueError, httpx.HTTPError):
+    except (ValueError, RecursionError, httpx.HTTPError):
         raise UpstreamError("invalid_response") from None
     finally:
         await response.aclose()
@@ -97,7 +111,7 @@ async def events(response):
                     done = True
                     return
                 try:
-                    obj = json.loads(data)
+                    obj = json.loads(data, parse_constant=_reject_json_constant, parse_float=_finite_json_float)
                     if not isinstance(obj, dict) or "error" in obj or not isinstance(obj.get("choices", []), list):
                         raise ValueError()
                     for choice in obj.get("choices", []):
@@ -106,7 +120,7 @@ async def events(response):
                         tools = choice.get("delta", {}).get("tool_calls", [])
                         if not isinstance(tools, list) or any(not isinstance(t, dict) for t in tools):
                             raise ValueError()
-                except ValueError:
+                except (ValueError, RecursionError):
                     raise UpstreamError("invalid_stream", False) from None
                 yield obj
         if not done:
