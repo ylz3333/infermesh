@@ -85,11 +85,11 @@ async def events(response):
     try:
         async for chunk in response.aiter_bytes():
             pending += chunk
-            if len(pending) > 1024 * 1024:
-                raise UpstreamError("stream_frame_too_large", False)
             pending = pending.replace(b"\r\n", b"\n")
             while b"\n\n" in pending:
                 frame, pending = pending.split(b"\n\n", 1)
+                if len(frame) > 1024 * 1024:
+                    raise UpstreamError("stream_frame_too_large", False)
                 data = b"\n".join(line[5:].lstrip() for line in frame.split(b"\n") if line.startswith(b"data:"))
                 if not data:
                     continue
@@ -109,6 +109,10 @@ async def events(response):
                 except ValueError:
                     raise UpstreamError("invalid_stream", False) from None
                 yield obj
+            # A network chunk may contain many valid frames. Bound only the
+            # unfinished frame left after consuming all complete ones.
+            if len(pending) > 1024 * 1024:
+                raise UpstreamError("stream_frame_too_large", False)
         if not done:
             raise UpstreamError("incomplete_stream", False)
     finally:
