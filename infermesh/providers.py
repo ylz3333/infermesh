@@ -111,7 +111,14 @@ async def events(response):
                 yield obj
             # A network chunk may contain many valid frames. Bound only the
             # unfinished frame left after consuming all complete ones.
-            if len(pending) > 1024 * 1024:
+            # After CRLF normalization, a split blank line can leave LF,
+            # CR, or LF+CR pending. Charge those bytes once their role is known.
+            pending_size = len(pending)
+            if pending.endswith(b"\n\r"):
+                pending_size -= 2
+            elif pending.endswith((b"\n", b"\r")):
+                pending_size -= 1
+            if pending_size > 1024 * 1024:
                 raise UpstreamError("stream_frame_too_large", False)
         if not done:
             raise UpstreamError("incomplete_stream", False)

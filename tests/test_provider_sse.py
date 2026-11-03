@@ -35,6 +35,18 @@ def test_multiple_valid_frames_can_exceed_limit_in_one_network_chunk(split):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("separator", [b"\n\n", b"\r\n\r\n"])
+def test_frame_at_limit_with_fragmented_separator(separator):
+    async def scenario():
+        frame = b'data: {"choices":[]}'.ljust(1024 * 1024)
+        for split in range(1, len(separator)):
+            body = Chunks([frame + separator[:split], separator[split:] + b"data: [DONE]\n\n"])
+            response = httpx.Response(200, stream=body)
+            assert [event async for event in events(response)] == [{"choices": []}]
+            assert body.closed
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("terminated", [False, True])
 def test_single_oversized_frame_is_rejected_even_when_split(terminated):
     async def scenario():
