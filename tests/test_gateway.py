@@ -48,6 +48,20 @@ def test_missing_key_fails_startup(monkeypatch):
             pass
 
 
+@pytest.mark.parametrize("role", [[], {}, ["user"], {"name": "user"}, None, 1, "unknown"])
+def test_invalid_message_roles_return_422_without_admission(role):
+    with TestClient(create_app(settings(requests_per_minute=1))) as c:
+        r = c.post("/v1/chat/completions", headers=HEADERS, json={
+            **BODY, "messages": [{"role": role, "content": "private-invalid-content"}]
+        })
+        assert r.status_code == 422
+        assert r.json() == {"detail": "Unsupported message role"}
+        state = c.get("/admin/status", headers=HEADERS).json()
+        assert state["inflight"] == 0
+        assert state["requests"] == []
+        assert c.post("/v1/chat/completions", headers=HEADERS, json=BODY).status_code == 200
+
+
 @pytest.mark.parametrize("policy", ["cost", "balanced", "latency"])
 def test_policies_and_complexity(policy):
     with TestClient(create_app(settings())) as c:

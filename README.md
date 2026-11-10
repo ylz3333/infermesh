@@ -67,6 +67,18 @@ Add `"stream":true` for SSE. Every successful response carries `X-Request-ID`,
 `X-Trace-ID`, and `X-InferMesh-Provider`. An interrupted stream contains an error
 event rather than a false `[DONE]`; the gateway never silently replays emitted tokens.
 
+If the gateway rejects a chat request, check the HTTP status and the JSON
+`detail` field before retrying:
+
+| Status | What to check |
+| --- | --- |
+| 413 | The whole request body exceeds 1 MiB. Shorten the conversation or reduce other fields, such as tool definitions. |
+| 422 | For `Unsupported message role`, give every message a string `role` of `system`, `developer`, `user`, `assistant`, or `tool`. For other validation errors, check that the body is valid JSON and `messages` contains 1–256 objects. |
+| 404 | For `Unknown model pool`, use a pool ID returned by the authenticated `GET /v1/models` endpoint. |
+
+These checks run before the gateway spends a request from the rate limit or
+contacts a provider. You can correct the payload and submit it immediately.
+
 ## Connect real models
 
 Copy `config/providers.example.json` to the git-ignored `config.local.json`.
