@@ -179,6 +179,49 @@ def test_real_sse_usage_and_done():
         assert c.get("/admin/status", headers=HEADERS).json()["requests"][0]["input_tokens"] == 2
 
 
+def test_coalesced_large_sse_preserves_output_accounting_and_cleanup():
+    payloads = [
+        {"choices": [{"index": 0, "delta": {"content": letter * 600000}}]}
+        for letter in ("a", "b")
+    ]
+    payloads.append({"choices": [], "usage": {"prompt_tokens": 2, "completion_tokens": 3}})
+    wire = b"".join(b"data: " + json.dumps(p).encode() + b"\n\n" for p in payloads)
+    wire += b"data: [DONE]\n\n"
+
+    class CoalescedStream(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            yield wire
+
+        async def aclose(self):
+            self.closed = True
+
+    upstream_body = CoalescedStream()
+    upstream_response = httpx.Response(200, stream=upstream_body)
+    transport = httpx.MockTransport(lambda req: upstream_response)
+    client = httpx.AsyncClient(transport=transport)
+    try:
+        with TestClient(create_app(real_settings(), client=client)) as c:
+            r = c.post("/v1/chat/completions", headers=HEADERS, json={**BODY, "stream": True})
+            assert r.status_code == 200
+            frames = [frame.removeprefix("data: ") for frame in r.text.strip().split("\n\n")]
+            assert frames[-1] == "[DONE]"
+            assert [json.loads(frame) for frame in frames[:-1]] == payloads
+            state = c.get("/admin/status", headers=HEADERS).json()
+            assert state["inflight"] == 0
+            assert all(p["inflight"] == 0 for p in state["providers"])
+            assert len(state["requests"]) == 1
+            entry = state["requests"][0]
+            assert entry["outcome"] == "success"
+            assert entry["attempts"] == ["real"]
+            assert entry["usage_reported"]
+            assert (entry["input_tokens"], entry["output_tokens"]) == (2, 3)
+            assert upstream_body.closed and upstream_response.is_closed
+    finally:
+        asyncio.run(client.aclose())
+
+
 def test_invalid_provider_response_releases_capacity():
     transport = httpx.MockTransport(lambda req: httpx.Response(200, json={"choices": [None]}))
     with TestClient(create_app(real_settings(), client=httpx.AsyncClient(transport=transport))) as c:
