@@ -106,7 +106,15 @@ def create_app(settings: Settings | None = None, *, client: httpx.AsyncClient | 
     async def metrics():
         return Response(generate_latest(app.state.telemetry.registry), headers={"Content-Type": CONTENT_TYPE_LATEST})
 
-    @app.post("/v1/chat/completions", dependencies=[Depends(authorize)])
+    @app.post("/v1/chat/completions", dependencies=[Depends(authorize)], openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {
+                "schema": {"$ref": "#/components/schemas/Chat"},
+                "example": {"model": "auto", "messages": [{"role": "user", "content": "ping"}]},
+            }},
+        },
+    })
     async def chat(request: Request):
         cfg = app.state.settings
         # Limit bytes before parsing and never echo request bodies in validation errors.
@@ -267,6 +275,19 @@ def create_app(settings: Settings | None = None, *, client: httpx.AsyncClient | 
         finish()
         return JSONResponse({"error": {"type": "upstream_unavailable", "message": "No provider completed this request", "request_id": rid}}, status_code=502, headers={"X-Request-ID": rid})
 
+    # The raw Request keeps the byte limit ahead of JSON parsing. Publish the
+    # same validation model explicitly, including its nested schema references.
+    chat_schema = Chat.model_json_schema(ref_template="#/components/schemas/{model}")
+    chat_definitions = chat_schema.pop("$defs", {})
+    chat_definitions["Chat"] = chat_schema
+    default_openapi = app.openapi
+
+    def openapi():
+        schema = default_openapi()
+        schema.setdefault("components", {}).setdefault("schemas", {}).update(chat_definitions)
+        return schema
+
+    app.openapi = openapi
     return app
 
 
