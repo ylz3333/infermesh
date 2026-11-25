@@ -41,6 +41,32 @@ def test_auth_and_public_health():
         assert c.post("/v1/chat/completions", json=BODY).status_code == 401
 
 
+def test_chat_openapi_request_schema_and_example():
+    with TestClient(create_app(settings())) as c:
+        document = c.get("/openapi.json").json()
+        operation = document["paths"]["/v1/chat/completions"]["post"]
+        request_body = operation["requestBody"]
+        assert request_body["required"] is True
+        content = request_body["content"]["application/json"]
+
+        def resolve(ref):
+            assert ref.startswith("#/")
+            node = document
+            for part in ref[2:].split("/"):
+                node = node[part.replace("~1", "/").replace("~0", "~")]
+            return node
+
+        chat = resolve(content["schema"]["$ref"])
+        assert chat["required"] == ["messages"]
+        assert chat["additionalProperties"] is False
+        messages = chat["properties"]["messages"]
+        assert (messages["minItems"], messages["maxItems"]) == (1, 256)
+        routing = resolve(chat["properties"]["routing"]["$ref"])
+        assert routing["properties"]["policy"]["enum"] == ["balanced", "cost", "latency"]
+        assert routing["properties"]["complexity"]["maximum"] == 3
+        assert c.post("/v1/chat/completions", headers=HEADERS, json=content["example"]).status_code == 200
+
+
 def test_missing_key_fails_startup(monkeypatch):
     monkeypatch.delenv("INFERMESH_API_KEY")
     with pytest.raises(RuntimeError, match="INFERMESH_API_KEY"):
