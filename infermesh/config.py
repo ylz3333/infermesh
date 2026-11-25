@@ -31,6 +31,11 @@ class Provider(BaseModel):
             url = urlparse(self.base_url)
             if url.scheme not in {"https", "http"} or not url.hostname or url.username or url.password or url.query or url.fragment:
                 raise ValueError("Use an http(s) API base URL without credentials/query/fragment")
+            try:
+                # urlparse validates port syntax/range only when this property is read.
+                _ = url.port
+            except ValueError:
+                raise ValueError("API base URL port must be an integer from 0 to 65535") from None
             if self.api_key_env and not os.getenv(self.api_key_env):
                 raise ValueError(f"Missing provider key environment variable: {self.api_key_env}")
         return self
